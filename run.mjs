@@ -234,12 +234,26 @@ async function recordSegment(page, inflight, spec, segment, index) {
 	};
 	const frames = Math.min(segment.frames, MAX_FRAMES);
 	const t2 = Date.now();
-	for (let f = 0; f < frames; f++)
-		await write(await page.evaluate((i) => window.__job.frame(i), f));
+	let waitMs = 0;
+	let writeMs = 0;
+	for (let f = 0; f < frames; f++) {
+		const a = Date.now();
+		const data = await page.evaluate((i) => window.__job.frame(i), f);
+		const b = Date.now();
+		await write(data);
+		waitMs += b - a;
+		writeMs += Date.now() - b;
+	}
 	await write(await page.evaluate(() => window.__job.flush()));
 	const captureMs = Date.now() - t2;
 	proc.stdin.end();
 	await finished;
+	const st = await page.evaluate(() => window.__job.stats?.() ?? null);
+	const ms = (v) => `${Math.round(v)}ms`;
+	if (st)
+		console.log(
+			`per frame: draw ${ms(st.draw)}, compose ${ms(st.compose)}, jpeg ${ms(st.encode)}, page call ${ms(waitMs / frames)}, pipe ${ms(writeMs / frames)}`,
+		);
 	console.log(
 		`captured ${frames} frames in ${(captureMs / 1000).toFixed(1)}s (${Math.round(captureMs / frames)} ms/frame), encode tail ${((Date.now() - t2 - captureMs) / 1000).toFixed(1)}s`,
 	);

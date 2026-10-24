@@ -43,19 +43,30 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-bin
+          key: ffmpeg-static-v1-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install system packages
         run: |
           lscpu | grep -m1 'Model name' || true
+          if [ ! -x ~/ffmpeg-bin/ffmpeg ]; then
+            mkdir -p ~/ffmpeg-bin
+            curl -fsSL --retry 3 --max-time 120 https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+              | tar xJ --strip-components=1 -C ~/ffmpeg-bin --wildcards '*/ffmpeg' || rm -f ~/ffmpeg-bin/ffmpeg
+          fi
+          [ -x ~/ffmpeg-bin/ffmpeg ] && echo "$HOME/ffmpeg-bin" >> "$GITHUB_PATH"
           need=""
-          command -v ffmpeg >/dev/null || need="$need ffmpeg"
+          [ -x ~/ffmpeg-bin/ffmpeg ] || command -v ffmpeg >/dev/null || need="$need ffmpeg"
           ls /usr/lib/$(uname -m)-linux-gnu/libEGL_mesa.so.0 >/dev/null 2>&1 || need="$need libegl1 libegl-mesa0 libgl1-mesa-dri"
           if [ -n "$need" ]; then
+            echo "installing:$need"
             for try in 1 2; do
               sudo timeout 120 apt-get install -y -qq --no-install-recommends -o Acquire::Retries=2 $need > /dev/null && break
               sudo timeout 60 apt-get update -qq || true
             done
           fi
-          command -v ffmpeg
           if [ ! -x /usr/bin/google-chrome ]; then
             npx -y playwright@1.52.0 install --with-deps chromium > /dev/null
             echo "CHROME_PATH=$(ls -d ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome | head -1)" >> "$GITHUB_ENV"
