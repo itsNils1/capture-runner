@@ -93,6 +93,8 @@ async function openPage(browser, spec) {
 	});
 	console.log(`webgl: ${renderer}`);
 	const inflight = new Map();
+	page.on("console", (m) => pageLogs.push(`${m.type()}: ${m.text()}`.slice(0, 300)));
+	page.on("pageerror", (e) => pageLogs.push(`error: ${e.message}`.slice(0, 300)));
 	page.on("request", (r) => inflight.set(r, Date.now()));
 	page.on("requestfinished", (r) => inflight.delete(r));
 	page.on("requestfailed", (r) => inflight.delete(r));
@@ -121,6 +123,21 @@ async function openPage(browser, spec) {
 	return { page, inflight };
 }
 
+// Private notes for a stuck page; only written when DIAG_DIR is set.
+async function saveDiag(page, inflight) {
+	if (!process.env.DIAG_DIR) return;
+	const now = Date.now();
+	const text = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+	const open = [...inflight].map(([r, at]) => [r.url(), now - at]);
+	mkdirSync(process.env.DIAG_DIR, { recursive: true });
+	writeFileSync(
+		join(process.env.DIAG_DIR, "diag.json"),
+		JSON.stringify({ text, open, logs: pageLogs.slice(-80) }, null, 1),
+	);
+}
+
+const pageLogs = [];
+
 async function fetchBase64(url) {
 	return Buffer.from(await (await call(url)).arrayBuffer()).toString("base64");
 }
@@ -132,7 +149,14 @@ async function recordSegment(page, inflight, spec, segment, index) {
 			waitUntil: "domcontentloaded",
 			timeout: 120_000,
 		});
-		await page.waitForSelector(spec.readySelector, { timeout: 180_000 });
+		try {
+			await page.waitForSelector(spec.readySelector, {
+				timeout: Number(process.env.READY_TIMEOUT_MS) || 180_000,
+			});
+		} catch (err) {
+			await saveDiag(page, inflight).catch(() => {});
+			throw err;
+		}
 		if (spec.css) await page.addStyleTag({ content: spec.css });
 		await page.evaluate(() => window.__job.ready());
 		console.log(`page ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);

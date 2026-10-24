@@ -50,6 +50,8 @@ jobs:
           MAX_FRAMES: ${{ inputs.frames }}
           VARIANT: ${{ matrix.variant }}
           JOB_PART: "1"
+          DIAG_DIR: samples
+          READY_TIMEOUT_MS: "120000"
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER: llvmpipe
           CHROME_ARGS: --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu
@@ -63,6 +65,7 @@ jobs:
           JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
         run: |
           mkdir -p samples
+          touch samples/.keep
           f=work/part-1/output.mp4
           if [ -f "$f" ]; then
             for s in 1 3 5 7; do ffmpeg -loglevel error -y -ss $s -i "$f" -frames:v 1 -q:v 3 samples/s$s.jpg || true; done
