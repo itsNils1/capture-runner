@@ -1,0 +1,58 @@
+name: bench
+run-name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      frames:
+        description: Frames to capture per variant
+        required: false
+        default: "240"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [swiftshader, llvmpipe-egl, llvmpipe-xvfb, lavapipe]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg xvfb mesa-utils libegl1 libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers > /dev/null
+          nproc
+
+      - name: Run
+        env:
+          SPEC_JSON: ${{ secrets.BENCH_SPEC }}
+          JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
+          DRY_RUN: "1"
+          MAX_FRAMES: ${{ inputs.frames }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          case "$VARIANT" in
+            swiftshader)
+              node run.mjs ;;
+            llvmpipe-egl)
+              LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe CHROME_ARGS="--use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu" node run.mjs ;;
+            llvmpipe-xvfb)
+              LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe HEADFUL=1 CHROME_ARGS="--use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu" xvfb-run -a -s "-screen 0 1920x1080x24" node run.mjs ;;
+            lavapipe)
+              VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1) CHROME_ARGS="--use-angle=vulkan --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu" node run.mjs ;;
+          esac
