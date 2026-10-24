@@ -38,8 +38,10 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/ffmpeg-bin
-          key: ffmpeg-static-v1-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            ~/ffmpeg-bin
+            ~/aptdebs
+          key: tools-v2-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install system packages
         run: |
@@ -53,12 +55,18 @@ jobs:
           need=""
           [ -x ~/ffmpeg-bin/ffmpeg ] || command -v ffmpeg >/dev/null || need="$need ffmpeg"
           ls /usr/lib/$(uname -m)-linux-gnu/libEGL_mesa.so.0 >/dev/null 2>&1 || need="$need libegl1 libegl-mesa0 libgl1-mesa-dri"
+          if [ -n "$need" ] && ls ~/aptdebs/*.deb >/dev/null 2>&1; then
+            sudo dpkg -i ~/aptdebs/*.deb > /dev/null 2>&1 && need="" && echo "installed from cache"
+          fi
           if [ -n "$need" ]; then
             echo "installing:$need"
+            mkdir -p ~/aptdebs/partial
             for try in 1 2; do
-              sudo timeout 120 apt-get install -y -qq --no-install-recommends -o Acquire::Retries=2 $need > /dev/null && break
+              sudo timeout 120 apt-get install -y -qq --no-install-recommends -o Acquire::Retries=2 -o Dir::Cache::archives="$HOME/aptdebs" $need > /dev/null && break
               sudo timeout 60 apt-get update -qq || true
             done
+            sudo chown -R "$USER" ~/aptdebs
+            rm -rf ~/aptdebs/partial ~/aptdebs/lock
           fi
 
       - name: Capture
