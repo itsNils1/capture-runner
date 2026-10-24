@@ -7,7 +7,12 @@ on:
       frames:
         description: Frames to capture per variant
         required: false
-        default: "240"
+        default: "480"
+        type: string
+      variants:
+        description: JSON array of variant names
+        required: false
+        default: '["a"]'
         type: string
 
 permissions:
@@ -16,11 +21,11 @@ permissions:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        variant: [swiftshader, llvmpipe-egl, llvmpipe-xvfb, lavapipe]
+        variant: ${{ fromJSON(inputs.variants) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,24 +40,39 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg xvfb mesa-utils libegl1 libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers > /dev/null
-          nproc
+          sudo apt-get install -y -qq ffmpeg libegl1 libegl-mesa0 libgl1-mesa-dri > /dev/null
 
       - name: Run
         env:
-          SPEC_JSON: ${{ secrets.BENCH_SPEC }}
+          BENCH_SPEC: ${{ secrets.BENCH_SPEC }}
           JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
           DRY_RUN: "1"
           MAX_FRAMES: ${{ inputs.frames }}
           VARIANT: ${{ matrix.variant }}
+          JOB_PART: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+          CHROME_ARGS: --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu
         run: |
-          case "$VARIANT" in
-            swiftshader)
-              node run.mjs ;;
-            llvmpipe-egl)
-              LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe CHROME_ARGS="--use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu" node run.mjs ;;
-            llvmpipe-xvfb)
-              LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe HEADFUL=1 CHROME_ARGS="--use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu" xvfb-run -a -s "-screen 0 1920x1080x24" node run.mjs ;;
-            lavapipe)
-              VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1) CHROME_ARGS="--use-angle=vulkan --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu" node run.mjs ;;
-          esac
+          export SPEC_JSON="$(node bench-spec.mjs)"
+          node run.mjs
+
+      - name: Pack samples
+        if: always()
+        env:
+          JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
+        run: |
+          mkdir -p samples
+          f=work/part-1/output.mp4
+          if [ -f "$f" ]; then
+            for s in 1 3 5 7; do ffmpeg -loglevel error -y -ss $s -i "$f" -frames:v 1 -q:v 3 samples/s$s.jpg || true; done
+            ls -la "$f"
+          fi
+          tar cf - samples | openssl enc -aes-256-cbc -pbkdf2 -pass env:JOB_TOKEN -out samples.bin
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: samples-${{ matrix.variant }}
+          path: samples.bin
+          retention-days: 1
