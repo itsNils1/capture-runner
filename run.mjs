@@ -30,7 +30,7 @@ if (PART && !/^\d{1,3}$/.test(PART)) {
 	console.error("invalid JOB_PART");
 	process.exit(2);
 }
-const work = resolve("work");
+const work = resolve("work", PART ? `part-${PART}` : "single");
 mkdirSync(work, { recursive: true });
 let progressUrl = null;
 
