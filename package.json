@@ -1,0 +1,10 @@
+{
+	"name": "capture-runner",
+	"private": true,
+	"type": "module",
+	"description": "Records scripted headless Chrome sessions to MP4 on GitHub Actions.",
+	"engines": { "node": ">=22" },
+	"dependencies": {
+		"puppeteer-core": "^24.0.0"
+	}
+}
