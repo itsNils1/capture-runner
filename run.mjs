@@ -108,13 +108,20 @@ async function openPage(browser, spec) {
 		const patch = (spec.patches || []).find((p) =>
 			url.pathname.endsWith(p.pathSuffix),
 		);
-		if (!patch) return r.continue({ headers });
 		try {
-			const res = await fetch(r.url(), { headers });
+			if (!patch && r.method() !== "GET") return r.continue({ headers });
+			const res = await fetchRetry(r.url(), headers);
+			const out = {};
+			for (const [k, v] of res.headers)
+				if (!/^(content-encoding|content-length|transfer-encoding|connection)$/i.test(k))
+					out[k] = v;
 			r.respond({
 				status: res.status,
+				headers: out,
 				contentType: res.headers.get("content-type") || "text/javascript",
-				body: `${await res.text()}${patch.append}`,
+				body: patch
+					? `${await res.text()}${patch.append}`
+					: Buffer.from(await res.arrayBuffer()),
 			});
 		} catch {
 			r.abort();
@@ -138,6 +145,26 @@ async function saveDiag(page, inflight) {
 
 const pageLogs = [];
 
+// The site sometimes answers 502/503 under load; a retry usually works.
+async function fetchRetry(url, headers) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			const res = await fetch(url, {
+				headers,
+				signal: AbortSignal.timeout(30_000),
+			});
+			if (![502, 503, 504].includes(res.status) || attempt >= 4) return res;
+			await res.arrayBuffer().catch(() => {});
+		} catch (err) {
+			if (attempt >= 4) throw err;
+		}
+		retries++;
+		await new Promise((ok) => setTimeout(ok, 250 * 2 ** attempt));
+	}
+}
+
+let retries = 0;
+
 async function fetchBase64(url) {
 	return Buffer.from(await (await call(url)).arrayBuffer()).toString("base64");
 }
@@ -159,7 +186,8 @@ async function recordSegment(page, inflight, spec, segment, index) {
 		}
 		if (spec.css) await page.addStyleTag({ content: spec.css });
 		await page.evaluate(() => window.__job.ready());
-		console.log(`page ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+		if (retries) console.log(`${retries} request(s) retried`);
+	console.log(`page ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 	}
 	const t1 = Date.now();
 	await page.evaluate((args) => window.__job.prepare(args), segment.args);
