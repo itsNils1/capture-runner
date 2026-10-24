@@ -106,7 +106,7 @@ jobs:
           touch samples/.keep
           f=work/part-1/output.mp4
           if [ -f "$f" ]; then
-            for s in 1 3 5 7; do ffmpeg -loglevel error -y -ss $s -i "$f" -frames:v 1 -q:v 3 samples/s$s.jpg || true; done
+            for s in 0.5 1.5 2.5 3.5 4.5 5.5 6.5 7.5; do ffmpeg -loglevel error -y -ss $s -i "$f" -frames:v 1 -q:v 3 samples/s$s.jpg || true; done
             ls -la "$f"
           fi
           tar cf - samples | openssl enc -aes-256-cbc -pbkdf2 -pass env:JOB_TOKEN -out samples.bin
