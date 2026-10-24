@@ -14,18 +14,24 @@ on:
         required: false
         default: '["a"]'
         type: string
+      runners:
+        description: JSON array of runner labels
+        required: false
+        default: '["ubuntu-latest"]'
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   bench:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         variant: ${{ fromJSON(inputs.variants) }}
+        runner: ${{ fromJSON(inputs.runners) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +48,7 @@ jobs:
           lscpu | grep -m1 'Model name' || true
           need=""
           command -v ffmpeg >/dev/null || need="$need ffmpeg"
-          ls /usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0 >/dev/null 2>&1 || need="$need libegl1 libegl-mesa0 libgl1-mesa-dri"
+          ls /usr/lib/$(uname -m)-linux-gnu/libEGL_mesa.so.0 >/dev/null 2>&1 || need="$need libegl1 libegl-mesa0 libgl1-mesa-dri"
           if [ -n "$need" ]; then
             for try in 1 2; do
               sudo timeout 120 apt-get install -y -qq --no-install-recommends -o Acquire::Retries=2 $need > /dev/null && break
@@ -50,6 +56,10 @@ jobs:
             done
           fi
           command -v ffmpeg
+          if [ ! -x /usr/bin/google-chrome ]; then
+            npx -y playwright@1.52.0 install --with-deps chromium > /dev/null
+            echo "CHROME_PATH=$(ls -d ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome | head -1)" >> "$GITHUB_ENV"
+          fi
 
       - name: Run
         env:
@@ -85,6 +95,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: samples-${{ matrix.variant }}
+          name: samples-${{ matrix.variant }}-${{ matrix.runner }}
           path: samples.bin
           retention-days: 1
