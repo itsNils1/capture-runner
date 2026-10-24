@@ -38,8 +38,17 @@ jobs:
 
       - name: Install system packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg libegl1 libegl-mesa0 libgl1-mesa-dri > /dev/null
+          lscpu | grep -m1 'Model name' || true
+          need=""
+          command -v ffmpeg >/dev/null || need="$need ffmpeg"
+          ls /usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0 >/dev/null 2>&1 || need="$need libegl1 libegl-mesa0 libgl1-mesa-dri"
+          if [ -n "$need" ]; then
+            for try in 1 2; do
+              sudo timeout 120 apt-get install -y -qq --no-install-recommends -o Acquire::Retries=2 $need > /dev/null && break
+              sudo timeout 60 apt-get update -qq || true
+            done
+          fi
+          command -v ffmpeg
 
       - name: Capture
         env:
