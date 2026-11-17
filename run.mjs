@@ -189,6 +189,7 @@ async function recordSegment(page, inflight, spec, segment, index) {
 		if (retries) console.log(`${retries} request(s) retried`);
 	console.log(`page ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 	}
+	if (segment.realistic) return recordRealistic(page, inflight, spec, segment, index);
 	const t1 = Date.now();
 	await page.evaluate((args) => window.__job.prepare(args), segment.args);
 	await settle(page, inflight, 700, 450, 25_000);
@@ -257,6 +258,159 @@ async function recordSegment(page, inflight, spec, segment, index) {
 	console.log(
 		`captured ${frames} frames in ${(captureMs / 1000).toFixed(1)}s (${Math.round(captureMs / frames)} ms/frame), encode tail ${((Date.now() - t2 - captureMs) / 1000).toFixed(1)}s`,
 	);
+	return out;
+}
+
+function encoder(spec, out) {
+	const { fps, preset, crf } = spec.encode;
+	return ffmpeg(
+		[
+			"-f",
+			"image2pipe",
+			"-framerate",
+			String(fps),
+			"-c:v",
+			"mjpeg",
+			"-i",
+			"-",
+			"-pix_fmt",
+			"yuv420p",
+			"-r",
+			String(fps),
+			"-c:v",
+			"libx264",
+			"-preset",
+			preset,
+			"-crf",
+			String(crf),
+			"-g",
+			String(fps * 2),
+			out,
+		],
+		true,
+	);
+}
+
+// A realistic clip is planned by the viewer's director, which decides the
+// length (rewinds, pauses, transitions) and drives the camera frame by frame.
+// Its game sound is rendered in the page afterwards and muxed in here; a
+// silent track stands in when that fails so every part has audio.
+async function recordRealistic(page, inflight, spec, segment, index) {
+	const t1 = Date.now();
+	await page.waitForFunction(() => window.__realistic?.ready?.(), {
+		timeout: 60_000,
+		polling: 250,
+	});
+	await settle(page, inflight, 700, 450, 25_000);
+	const info = await page.evaluate(
+		(args) => window.__realistic.plan(args),
+		segment.args,
+	);
+	console.log(
+		`realistic plan: ${info.frames} frames, ${info.shots?.length ?? 0} shot(s), prepared in ${((Date.now() - t1) / 1000).toFixed(1)}s`,
+	);
+	const fps = spec.encode.fps;
+	const quality = segment.args?.quality ?? 0.95;
+	const video = join(work, `part-${index}-video.mp4`);
+	const { proc, finished } = encoder(spec, video);
+	const write = async (b64) => {
+		if (!b64) return;
+		if (!proc.stdin.write(Buffer.from(b64, "base64")))
+			await new Promise((r) => proc.stdin.once("drain", r));
+	};
+	const frames = Math.min(info.frames, MAX_FRAMES);
+	const t2 = Date.now();
+	for (let f = 0; f < frames; f++) {
+		const data = await page.evaluate(
+			async (i, rate, q) => {
+				await window.__realistic.prepareFrame(i);
+				return window.__job.realisticFrame(rate, q);
+			},
+			f,
+			fps,
+			quality,
+		);
+		await write(data);
+		if (f % (fps * 5) === 0)
+			await progress(`Rendering clip ${index + 1} (${Math.round((f / frames) * 100)}%)`, index);
+	}
+	await write(await page.evaluate(() => window.__job.flush()));
+	proc.stdin.end();
+	await finished;
+	const captureMs = Date.now() - t2;
+	console.log(
+		`captured ${frames} frames in ${(captureMs / 1000).toFixed(1)}s (${Math.round(captureMs / frames)} ms/frame)`,
+	);
+	const seconds = frames / fps;
+	const wav = join(work, `part-${index}.wav`);
+	const sound = await page
+		.evaluate(async (volume) => {
+			const sound = await window.__realistic.renderAudio({ volume });
+			if (!sound?.channels?.length) return null;
+			const buffer = { sampleRate: sound.sampleRate };
+			const left = sound.channels[0];
+			const right = sound.channels[1] ?? left;
+			const length = left.length;
+			const bytes = new Uint8Array(44 + length * 4);
+			const view = new DataView(bytes.buffer);
+			const tag = (at, text) => {
+				for (let i = 0; i < 4; i++) view.setUint8(at + i, text.charCodeAt(i));
+			};
+			tag(0, "RIFF");
+			view.setUint32(4, 36 + length * 4, true);
+			tag(8, "WAVE");
+			tag(12, "fmt ");
+			view.setUint32(16, 16, true);
+			view.setUint16(20, 1, true);
+			view.setUint16(22, 2, true);
+			view.setUint32(24, buffer.sampleRate, true);
+			view.setUint32(28, buffer.sampleRate * 4, true);
+			view.setUint16(32, 4, true);
+			view.setUint16(34, 16, true);
+			tag(36, "data");
+			view.setUint32(40, length * 4, true);
+			for (let i = 0; i < length; i++) {
+				const l = Math.max(-1, Math.min(1, left[i]));
+				const r = Math.max(-1, Math.min(1, right[i]));
+				view.setInt16(44 + i * 4, l * 32767, true);
+				view.setInt16(46 + i * 4, r * 32767, true);
+			}
+			let text = "";
+			for (let i = 0; i < bytes.length; i += 0x8000)
+				text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+			return btoa(text);
+		}, segment.gameVolume ?? 0.8)
+		.catch((err) => {
+			console.log(`game sound failed: ${err.message}`);
+			return null;
+		});
+	if (sound) writeFileSync(wav, Buffer.from(sound, "base64"));
+	const out = join(work, `part-${index}.mp4`);
+	await ffmpeg([
+		"-i",
+		video,
+		...(sound
+			? ["-i", wav]
+			: ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]),
+		"-map",
+		"0:v",
+		"-map",
+		"1:a",
+		"-c:v",
+		"copy",
+		"-c:a",
+		"aac",
+		"-b:a",
+		"160k",
+		"-ar",
+		"48000",
+		"-ac",
+		"2",
+		"-t",
+		seconds.toFixed(3),
+		out,
+	]).finished;
+	console.log(`game sound ${sound ? "added" : "missing, silent track used"}`);
 	return out;
 }
 
