@@ -291,6 +291,55 @@ function encoder(spec, out) {
 	);
 }
 
+// A long realistic clip is rendered by several runners at once. Every one of
+// them plans the whole clip (the plan is seeded, so all of them get the same
+// one) and renders only its share: part k of n. The cuts go where the
+// director already cuts away, behind the /goto loading screen, when one is
+// near an even split, and on the even split otherwise.
+function partRange(info, range) {
+	const total = info.frames;
+	const n = Number(range?.of);
+	const k = Number(range?.part);
+	if (!(n > 1) || !(k >= 0 && k < n)) return { from: 0, to: total };
+	const shots = info.shots || [];
+	const seams = shots
+		.filter((s, i) => i > 0 && s.kind === "arrive" && shots[i - 1].kind === "goto")
+		.map((s) => s.outFrom);
+	const reach = Math.floor(total / n / 3);
+	const cuts = [0];
+	for (let i = 1; i < n; i++) {
+		const ideal = Math.round((i * total) / n);
+		const seam = seams
+			.filter((s) => Math.abs(s - ideal) <= reach && s > cuts.at(-1))
+			.sort((a, b) => Math.abs(a - ideal) - Math.abs(b - ideal))[0];
+		cuts.push(seam ?? Math.max(cuts.at(-1) + 1, ideal));
+	}
+	cuts.push(total);
+	return { from: Math.min(cuts[k], total), to: Math.min(cuts[k + 1], total) };
+}
+
+// Plays the director up to the first frame of this part without drawing
+// anything, so the camera, chat and HUD arrive there exactly as they would
+// had every earlier frame been rendered.
+async function catchUp(page, from, fps) {
+	const batch = 30;
+	for (let f = 0; f < from; f += batch) {
+		await page.evaluate(
+			async (a, b, rate) => {
+				for (let i = a; i < b; i++) {
+					await window.__realistic.prepareFrame(i);
+					if (window.__job.realisticSkip) window.__job.realisticSkip(rate);
+					else window.__job.realisticFrame(rate, 0.1);
+				}
+			},
+			f,
+			Math.min(from, f + batch),
+			fps,
+		);
+	}
+	await page.evaluate(() => window.__job.flush());
+}
+
 // A realistic clip is planned by the viewer's director, which decides the
 // length (rewinds, pauses, transitions) and drives the camera frame by frame.
 // Its game sound is rendered in the page afterwards and muxed in here; a
@@ -311,6 +360,19 @@ async function recordRealistic(page, inflight, spec, segment, index) {
 	);
 	const fps = spec.encode.fps;
 	const quality = segment.args?.quality ?? 0.95;
+	const { from, to } = partRange(info, segment.range);
+	if (from > 0) {
+		const t0 = Date.now();
+		await progress(`Catching up to clip ${index + 1}`, index);
+		await catchUp(page, from, fps);
+		// Nothing was drawn on the way here, so the world around this frame is
+		// finished loading now. Not with settle(): its idle steps move the
+		// camera, and this part would no longer match the frames before it.
+		await page.evaluate(() => window.__job.realisticSettle?.());
+		console.log(
+			`part ${segment.range.part + 1} of ${segment.range.of}: caught up ${from} frames in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+		);
+	}
 	const video = join(work, `part-${index}-video.mp4`);
 	const { proc, finished } = encoder(spec, video);
 	const write = async (b64) => {
@@ -318,7 +380,7 @@ async function recordRealistic(page, inflight, spec, segment, index) {
 		if (!proc.stdin.write(Buffer.from(b64, "base64")))
 			await new Promise((r) => proc.stdin.once("drain", r));
 	};
-	const frames = Math.min(info.frames, MAX_FRAMES);
+	const frames = Math.min(to - from, MAX_FRAMES);
 	const t2 = Date.now();
 	for (let f = 0; f < frames; f++) {
 		const data = await page.evaluate(
@@ -326,7 +388,7 @@ async function recordRealistic(page, inflight, spec, segment, index) {
 				await window.__realistic.prepareFrame(i);
 				return window.__job.realisticFrame(rate, q);
 			},
-			f,
+			from + f,
 			fps,
 			quality,
 		);
@@ -390,7 +452,7 @@ async function recordRealistic(page, inflight, spec, segment, index) {
 		"-i",
 		video,
 		...(sound
-			? ["-i", wav]
+			? ["-ss", (from / fps).toFixed(4), "-i", wav]
 			: ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]),
 		"-map",
 		"0:v",
